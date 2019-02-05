@@ -1,0 +1,499 @@
+---
+title: "Project Child Support"
+output:
+  html_notebook: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+date: "Saturday, March 4, 2017"
+student: Carl-Oscar Gustafson
+---
+
+The data for this project describe payments for child support made to a government agency.  A "case" refers to a legal judgment that an absent parent (abbreviated in variable names as "AP") must make child support payments.  The data is distributed in *four* CSV files, stored on in the data folder.  The data are distributed "as is" as obtained from the agency (albeit anonymized).  Most categorical variables are self-explanatory.
+
+The file **cases.csv** has six columns, one for each case:
+
+* CASE_NUM       Unique case identifier
+* CASE_STATUS    ACV (active), IN_ (inactive), IC_ (closed), IO_ (legal),  IS_(suspend)
+* CASE_SUBTYPE   AO (arrears), EF (foster), MA (medical), NO (arrears), RA (regular), RN (regular)  
+* CASE_TYPE      AF (AFDC), NA (non-afdc), NI (other)
+* AP_ID          Identifying number for absent parent
+* LAST_PYMNT_DT  Recorded date of last payment
+
+The file **parents.csv** has 10 columns, one for each parent:
+
+* AP_ID             Unique identifier for parent
+* AP_ADDR_ZIP       Coded na for missing, 0 for "known unknown", 1 for city, 2 south state, 3 north state, 4 other
+* AP_DECEASED_IND   AP is deceased
+* AP_CUR_INCAR_IND  AP is incarcerated
+* AP_APPROX_AGE  
+* MARITAL_STS_CD    Self-explanatory
+* SEX_CD           
+* RACE_CD           Categorical
+* PRIM_LANG_CD      Language code
+* CITIZENSHIP_CD    Citizenship code
+
+The file **children.csv** has 9 columns:
+
+* CASE_NUM           Case number 
+* ID                 Unique identifier for child
+* SEX_CD           
+* RACE_CD            
+* MARITAL_STS_CD     Marital status code
+* PRIM_LANG_CD       Primary language
+* CITIZENSHIP_CD   
+* DATE_OF_BIRTH_DT 
+* DRUG_OFFNDR_IND    Past drug offence
+
+The file **payments.csv** has only six columns, but more than 1.5 million records:
+
+* CASE_NUM       Case number for the payment
+* PYMNT_AMT      Dollar amount of payment
+* COLLECTION_DT  Date of payment
+* PYMNT_SRC      A (regular), C (worker comp), F (tax offset), I (interstate), S (st tax), W (garnish)
+* PYMNT_TYPE     A (cash), B (bank), C (check), D (credit card), E (elec trans), M (money order)
+* AP_ID          Absent parent ID
+
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+## 1.   File linkage integrity
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+Installing necessary packages, loading the data, and viewing the dimensions
+
+```{r}
+library("dplyr")
+library("ggplot2")
+
+# Load data into data frames. Change path to the location of your data files
+path <- "C:/Users/Calle/Downloads/STAT405-Payments/"
+cases <- read.csv(paste0(path, "cases.csv"))
+parents <- read.csv(paste0(path, "parents.csv"))
+children <- read.csv(paste0(path, "children.csv"))
+payments <- read.csv(paste0(path, "payments.csv"))
+dim(cases)
+dim(parents)
+dim(children)
+dim(payments)
+```
+
+There is an average 1.6 children per case.
+
+```{r}
+#Histogram
+NumKids <- as.vector(table(children$CASE_NUM))
+hist(NumKids, prob=TRUE, main="Histogram of Number of Children per Case")
+
+#Mark the location of the mean
+abline(v=mean(NumKids))
+
+#Avg. children per case: 1.6
+```
+
+The maximum number of cases attached to any given child is 12 cases
+
+```{r}
+table(children$ID)[which.max(as.vector(table(children$ID)))]
+#12 cases
+
+library(dplyr)
+filter(children, ID=="153343287")
+```
+
+Every absent parent (AP_ID) identified in the payments data have an identifying record in the parents data file
+
+```{r}
+test <- subset(payments, !(payments$AP_ID %in% parents$AP_ID))
+test
+```
+Result: 0 rows, indicating that every payment has a corresponding parent in the payments dataframe
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+## 2. Recoding categories
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+Some categorical variables among these data frames are sparse (seldom observed).  For example, the variable PYMNT_SRC in Payments has category 'M' with 2 cases and category 'R' with 7.  These are too few for modeling in regression.
+
+For that reason, I will write a function pool_categories(data, threshold) that pools sparse categories with few occurences into an "_Other_" category and counts the frequency of categories within a given variable
+
+```{r}
+pool_categories <- function(data,threshold) {
+    i <- table(data) < threshold
+    below_threshold <- names(table(data))[i]
+    if ( "_Other_" %in% names(table(data)) ) { stop("Factor level '_Other_' already exists") }
+    src <- as.character(data)
+    src[src %in% below_threshold] <- "_Other_" 
+  return(as.factor(src))
+}
+
+table(pool_categories(payments$PYMNT_SRC, threshold=150))
+```
+
+Example result:
+_Other_       A       C       F       G       I       S       U       W 
+    278   69144    2092    6690     513   19762    4305   50574 1356858 
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+## 3. Payment counts and amounts
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+Payments were made between July 6, 2002 and November 4, 2016
+
+```{r}
+# Creating a date variable and examining the range of dates
+payments$DATE <- as.Date(payments$COLLECTION_DT, "%m/%d/%Y")
+from <- payments$DATE[which.min(payments$DATE)]
+to <- payments$DATE[which.max(payments$DATE)]
+paste0("Dates range from ",from," to ",to)
+
+# Result: "Dates range from 2002-07-06 to 2016-11-04"
+```
+
+Almost all payments were made after May 1, 2015. Only 0.38% of payments occured before then.
+
+```{r}
+# Percentage of total payments made before May 1, 2015
+decim <- sum(payments$DATE < as.Date("2015-05-01", "%Y-%m-%d"))/(length(payments$DATE))
+perc <- round(decim*100, digits=2)
+paste0(perc,"%")
+
+# Result: 0.38%
+
+```
+
+Examining the total number of payments made on each day (from May 1, 2015 through the end of the data) shows repeating instances of days with a very high number of payments.
+
+```{r}
+library(ggplot2)
+postMay15 <- as.Date("2015-05-01", "%Y-%m-%d")
+payments %>%
+  group_by(DATE) %>%
+    dplyr::summarize(
+      count      = n()
+    ) %>%
+      filter(DATE >= postMay15) %>%
+        ggplot() + 
+          geom_line(aes(x=DATE, y=count)) +
+          labs(y="Payments per Day") +
+          labs(x="Time")
+```
+
+The bimodal distribution explains the outliers - generally, the number of payments per day is normally distributed (most days it fall around ~2500 payments), with the exception of the 3rd day of the month (likely the due date) when a significant number of absent parents pay child support.
+
+```{r}
+# Distribution of payments per day
+payments %>%
+  group_by(DATE) %>%
+    dplyr::summarize(
+      count      = n()
+    ) %>%
+      filter(DATE >= postMay15) %>%
+        ggplot() + 
+          geom_histogram(aes(count),bins = 30) +
+          labs(x="Payments per Day") +
+          labs(title = "Distribution of Payments per Day, bin=40")
+
+# Number of payments by day of the month
+y <- as.vector(table(format(payments$DATE, "%d")))
+x <- 1:31
+plot(x,y, xlab = "Days of the month", ylab = "Total number of payments")
+
+```
+
+The distribution of the payment amounts shows a bumpy distribution curve peaking at $100. The peak suggests that certain payment amounts come more naturally to people's minds than others.
+
+```{r}
+
+sample1 <- payments[sample(nrow(payments), 10000), ]
+
+ggplot(sample1, aes(x=PYMNT_AMT)) + 
+  geom_density() + 
+  scale_x_log10(breaks=c(10,25,50,100,300,1000,5000)) +
+  labs(x="Payment Amounts") +
+  labs(title = "Distribution of Payment Amounts")  
+
+#It 
+```
+
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+## 4. Most common parent
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+One absent parent has a whopping 33 cases under his or her belt.
+
+```{r}
+max <- which.max(as.vector(table(cases$AP_ID)))
+mostparent <- table(cases$AP_ID)[max]
+paste0("Absent parent with ID number ", names(mostparent), " has the most cases (", mostparent," cases)")
+```
+
+These 33 cases are associated with 68 different children. That's a lot of child support!
+
+```{r}
+mostcase <- as.integer(filter(cases, AP_ID == names(mostparent))[,"CASE_NUM"])
+allkids <- filter(children, CASE_NUM %in% mostcase)
+allkids
+#There are 68 children associated with the cases of that parent
+```
+
+The average age of the childrens is 17 years old as of March 4, 2017
+
+```{r}
+Age <- (as.Date("03/04/17", "%m/%d/%y") - as.Date(allkids$DATE_OF_BIRTH_DT, "%m/%d/%Y"))/365
+MeanAge <- round(mean(Age)[[1]], digits = 1)
+paste0("The average age of these children is ", MeanAge, " years")
+```
+
+The parent hasn't made a single child support payment (at least not after July 6, 2002)
+
+```{r}
+filter(payments, AP_ID == names(mostparent))
+```
+
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+## 5.     Payments for cases
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+Parents deemed responsible for more children are more likely to make either a larger number of payments or a larger total payment amount over this period. Running two separate linear regressions, we see that the number of children is predictive of both total number of payments and total payment amount (p < 0.05).
+
+```{r}
+#Creating a table of total number of payments and total payment amounts for each parent ID
+APs <- group_by(payments, AP_ID)
+Smry <- dplyr::summarize(APs,
+            numpay     = n(),
+            totalpay   = sum(PYMNT_AMT)
+    )
+
+IDs <- group_by (children, CASE_NUM)
+Smry2 <- dplyr::summarize(IDs,
+                          numkid = n()     ## number of kids per case number
+                          )
+
+Smry3 <- merge(cases, Smry2, by="CASE_NUM")  #Adds kids per case number column to cases
+
+IDs1 <- group_by (Smry3, AP_ID)  #Calculating total number of kids per parent
+Smry4 <- dplyr::summarize(IDs1,
+                          numkid = sum(numkid)
+                          )
+
+newsmry <- merge(x = Smry4, y = Smry[,c("AP_ID","numpay","totalpay")], by = "AP_ID", all.x = TRUE)
+newsmry$numpay[is.na(newsmry[,"numpay"])] <- 0
+newsmry$totalpay[is.na(newsmry[,"totalpay"])] <- 0
+
+summary(lm(totalpay ~ numkid, data=newsmry))
+summary(lm(numpay ~ numkid, data=newsmry))
+```
+
+Parents responsible for younger children are more likely to make higher amounts over time. 
+
+```{r}
+IDs1 <- group_by (children, CASE_NUM)
+TotAgeCase <- dplyr::summarize(IDs1,
+                          totage = as.numeric(sum((as.Date("03/04/17", "%m/%d/%y")-as.Date(DATE_OF_BIRTH_DT, "%m/%d/%Y"))/365)[[1]])   
+                          )
+
+TotAgeCase1 <- merge(cases, TotAgeCase, by="CASE_NUM")
+
+APs1 <- group_by(TotAgeCase1, AP_ID)
+TotAgeParent <- dplyr::summarize(APs1,
+                                 totalage = sum(totage)
+                                 )
+
+FinalSmry1 <- merge(newsmry, TotAgeParent, by="AP_ID")
+head(FinalSmry1)
+FinalSmry1$avgage <- FinalSmry1$totalage / FinalSmry1$numkid
+summary(lm(totalpay ~ avgage, data=FinalSmry1))
+
+```
+
+The negative coefficient (with p<0.05) estimate suggests that parents with children of a higher average age on average pay a lower total amount.
+
+
+(c) The parent location (AP_ADDR_ZIP) is indicative of the total amount of payments made by the absent parent (F-test: p<0.05). Parents outside of cities pay the most (ZIP02 and ZIP03).
+
+```{r}
+FinalSmry2 <- subset(merge(newsmry, parents, by="AP_ID"), numpay != 0)
+summary(lm(totalpay ~ AP_ADDR_ZIP, data=FinalSmry2))
+```
+
+Running a multivariate regression indicates that the following factors are predictive of the total amount paid in child support by an absent parent:
+Number of payments made, number of kids, location, marital status, sex, and citizenship
+
+Note that although some race variables have p-values below 0.05, race may still not be predictive. Adjusting for multiple tests using Bonferoni correction suggests it is not.
+
+
+```{r}
+Smry5 <- merge(FinalSmry1, parents, by="AP_ID")
+
+#Checking what levels correspond to a missing value
+levels(Smry5$AP_ADDR_ZIP) # "na"
+levels(Smry5$AP_DECEASED_IND) #" "
+levels(Smry5$MARITAL_STS_CD) #" "
+levels(Smry5$SEX_CD) #"U"
+levels(Smry5$RACE_CD) #"U"
+levels(Smry5$PRIM_LANG_CD) #""
+levels(Smry5$CITIZENSHIP_CD) #""
+
+#Fixing columns
+Unknowns <- function(data, string, sub) {
+  data1 <- as.character(data)
+  data1[data1 == string] <- sub
+  data1 <- as.factor(data1)
+return(data1)
+  }
+
+Smry5$AP_ADDR_ZIP <- Unknowns(Smry5$AP_ADDR_ZIP,"na","U")
+Smry5$AP_DECEASED_IND <- Unknowns(Smry5$AP_DECEASED_IND," ","U")
+Smry5$MARITAL_STS_CD <- Unknowns(Smry5$MARITAL_STS_CD," ","U")
+Smry5$PRIM_LANG_CD <- Unknowns(Smry5$PRIM_LANG_CD,"","U")
+Smry5$CITIZENSHIP_CD <- Unknowns(Smry5$CITIZENSHIP_CD,"","U")
+any(!is.na(Smry5$AP_CUR_INCAR_IND))   # All in this category are NAs - I will not include it
+
+#Running regression
+summary(lm(totalpay ~ numpay + numkid + AP_ADDR_ZIP + AP_DECEASED_IND + AP_APPROX_AGE + MARITAL_STS_CD + SEX_CD + RACE_CD + PRIM_LANG_CD + CITIZENSHIP_CD, data=Smry5))
+```
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+## 6.     Payment consistency
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+
+Cases
+* CASE_NUM       Unique case identifier
+* CASE_STATUS    ACV (active), IN_ (inactive), IC_ (closed), IO_ (legal),  IS_(suspend)
+* CASE_SUBTYPE   AO (arrears), EF (foster), MA (medical), NO (arrears), RA (regular), RN (regular)  
+* CASE_TYPE      AF (AFDC), NA (non-afdc), NI (other)
+* AP_ID          Identifying number for absent parent
+* LAST_PYMNT_DT  Recorded date of last payment
+
+Children
+* CASE_NUM           Case number 
+* ID                 Unique identifier for child
+* SEX_CD           
+* RACE_CD            
+* MARITAL_STS_CD     Marital status code
+* PRIM_LANG_CD       Primary language
+* CITIZENSHIP_CD   
+* DATE_OF_BIRTH_DT 
+* DRUG_OFFNDR_IND    Past drug offence
+
+Parents
+* AP_ID             Unique identifier for parent
+* AP_ADDR_ZIP       Coded na for missing, 0 for "known unknown", 1 for city, 2 south state, 3 north state, 4 other
+* AP_DECEASED_IND   AP is deceased
+* AP_CUR_INCAR_IND  AP is incarcerated
+* AP_APPROX_AGE  
+* MARITAL_STS_CD    Self-explanatory
+* SEX_CD           
+* RACE_CD           Categorical
+* PRIM_LANG_CD      Language code
+* CITIZENSHIP_CD    Citizenship code
+
+Payment
+* CASE_NUM       Case number for the payment
+* PYMNT_AMT      Dollar amount of payment
+* COLLECTION_DT  Date of payment
+* PYMNT_SRC      A (regular), C (worker comp), F (tax offset), I (interstate), S (st tax), W (garnish)
+* PYMNT_TYPE     A (cash), B (bank), C (check), D (credit card), E (elec trans), M (money order)
+* AP_ID          Absent parent ID
+
+Again, the unit of analysis for this question is an absent parent. An important aspect of payments is the consistency of the payments over time. 
+
+A steady income stream is, for many, preferable to a highly volatile, unpredictable payment schedule, even if the latter has a higher average.Among parents who make inconsistent payments, those who make larger daily payments also make more volatile payments (p<0.05).
+
+```{r}
+DF1 <- payments %>%
+  group_by(AP_ID) %>%
+    summarize(
+      avgpay = mean(PYMNT_AMT),
+      sdpay = sd(PYMNT_AMT)
+    )
+
+inconsistent_payers <- subset(DF1, sdpay != 0)
+summary(lm(sdpay ~ avgpay, data=inconstitent_payors))
+```
+
+The coefficient of variation (CV) is the ratio of the SD of daily payments to the mean. The following is a time sequence plots showing the payments of 3 parents, with low, medium and high CV.
+
+```{r}
+DF2 <- payments %>%
+  group_by(AP_ID) %>%
+    summarize(
+      numpay = n(),
+      avgpay = mean(PYMNT_AMT),
+      sdpay = sd(PYMNT_AMT),
+      CV = sdpay/avgpay
+    ) %>%
+  filter(numpay > 3)
+
+percs <- quantile(DF2$CV, c(0.1,0.45, 0.55, 0.9), na.rm = TRUE)
+IDLow <- DF2$AP_ID[which(DF2$CV <= percs[[1]])[1]]
+IDMedium <- DF2$AP_ID[which(percs[[2]] <= DF2$CV | DF2$CV <= percs[[3]])[1]]
+IDHigh <- DF2$AP_ID[which(DF2$CV > percs[[4]])[1]]
+AllIDs <- c(IDLow, IDMedium, IDHigh)
+
+DF3 <- payments %>%
+    filter(AP_ID %in% AllIDs) %>%
+      arrange(AP_ID, DATE) %>%
+        group_by(AP_ID)
+  
+DF3$AP_ID <- factor(DF3$AP_ID, levels = c(IDLow, IDMedium, IDHigh))
+         
+ggplot(data=DF3, aes(x=DATE, y=PYMNT_AMT, color=AP_ID)) +
+  geom_line() +
+  theme_bw() +
+  scale_x_date(date_labels = "%b %y") +
+  scale_color_manual(labels = c("Low", "Medium", "High"), values = c("blue", "red", "green")) +
+  labs(x="Time", y="Payment Amount", title="Payment History Among Three Parents with Different CVs", color="Level of CV")
+```
+
+On average, the more a parent pays over a given time period, the more volatile are the payments in terms of CV (p-value < 0.05), which is consistent with the first observation in issue 6.
+
+```{r}
+#Only includes those parents who have made more than one payments, since those who've only paid once automatically have a CV of 0, distorting results
+DF4 <- payments %>%
+  group_by(AP_ID) %>%
+    summarize(
+      numpay = n(),
+      totpay = sum(PYMNT_AMT),
+      avgpay = mean(PYMNT_AMT),
+      sdpay = sd(PYMNT_AMT),
+      CV = sdpay/avgpay
+    ) %>%
+  filter(numpay > 1)
+
+summary(lm(CV ~ totpay, data=DF4))
+```
+
+The following regression shows that certain parent attributes are actually indicative of more consistent payments. The volatility the can be expected to be lower on average when:
+1. The parent is either deceased or living status is unknown
+2. The parent's marital status is N (p-value for marital status M is too close to 0.05 given number of parameters to be considered significant)
+3. The parent is male
+4. The parent's citizenship is unknown  
+
+```{r}
+#Only includes those parents who have made more than one payments, since those who've only paid once automatically have a CV of 0, distorting results
+DF5 <- merge(DF4, parents, by="AP_ID")
+DF5$AP_ADDR_ZIP <- Unknowns(DF5$AP_ADDR_ZIP,"na","U")
+DF5$AP_DECEASED_IND <- Unknowns(DF5$AP_DECEASED_IND," ","U")
+DF5$MARITAL_STS_CD <- Unknowns(DF5$MARITAL_STS_CD," ","U")
+DF5$PRIM_LANG_CD <- Unknowns(DF5$PRIM_LANG_CD,"","U")
+DF5$CITIZENSHIP_CD <- Unknowns(DF5$CITIZENSHIP_CD,"","U")
+
+summary(lm(CV ~ AP_ADDR_ZIP + AP_DECEASED_IND + AP_APPROX_AGE + MARITAL_STS_CD + SEX_CD + RACE_CD + PRIM_LANG_CD + CITIZENSHIP_CD, data=DF5))
+```
+
+
